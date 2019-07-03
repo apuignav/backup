@@ -1,4 +1,10 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# =============================================================================
+# @file   backup.py
+# @author Albert Puig (albert.puig@cern.ch)
+# @date   03.07.2019
+# =============================================================================
 """Backup directories."""
 
 import shutil
