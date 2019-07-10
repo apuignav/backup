@@ -7,19 +7,24 @@
 # =============================================================================
 """Backup directories."""
 
-import shutil
 import sys
 import os
-
-import argparse
 
 import subprocess
 
 import yaml
+import click
 
 
 # require Python interpreter > v.3.5
 assert sys.version_info >= (3, 5)
+
+
+RSYNC_OPTS = {'compress': '-z',
+              'human-readable': '-h',
+              'progress': '--info=progress2',
+              'delete-excluded': '--delete-excluded',
+              'delete-from-dest': '--delete'}
 
 
 def load_config(config_file):
@@ -35,75 +40,122 @@ def load_config(config_file):
         KeyError: If parts of the configuration are missing.
 
     """
+    if not os.path.exists(config_file):
+        raise OSError(f"Cannot find config file {config_file}")
     with open(config_file, 'r') as config_:
         config = yaml.safe_load(config_)
     return config['rsync-config'], config['profiles']
 
 
-def do_backup(config, rsync_config, dry_run):
-    """Run the backup procedure.
+def process_rsync_config(config_list):
+    """Convert rsync config to flags for command line.
+
+    If elements of the configuration list start with a hyphen, they are
+    used verbatim. Otherwise, they are replaced by the correct flag from `RSYNC_OPTS`.
 
     Arguments:
-        config (dict): Backup configuration.
-        rsync_config (list): General rsync configuration.
-        dry_run (bool): Perform a dry run?
+        config_list (list): Options to configure.
 
     Return:
-        bool
+        list
+
+    Raise:
+        KeyError: If some configuration flags are unknown.
 
     """
-    rsync_config_str = ' '.join(rsync_config)
-    if 'extra-config' in config:
-        rsync_config_str += ' '
-        rsync_config_str += ' '.join(config['extra-config'])
-    if dry_run:
-        rsync_config_str += ' --dry-run'
-    origin = config['origin']
-    if isinstance(origin, list):
-        origin = ' '.join(origin)
-    dest = config['dest']
-    excludes = ' '.join(f'--exclude "{exclude}"' for exclude in config.get('excludes', []))
-    cmd = f"rsync {origin} {dest} {rsync_config_str} {excludes}"
-    print(cmd)
+    processed_config = []
+    for config_element in config_list:
+        if config_element.startswith('-'):
+            processed_config.append(config_element)
+        else:
+            try:
+                processed_config.append(RSYNC_OPTS[config_element])
+            except KeyError:
+                raise KeyError(f"Unknown configuration -> {config_element}")
+    return processed_config
+
+
+@click.group()
+@click.option('-c', '--config', type=str, default=os.path.expanduser('~/.backuprc'),
+              help='Configuration file')
+@click.option('-n', '--dry-run', is_flag=True, default=False, help='Dry-run?')
+@click.pass_context
+def cli(ctx, config, dry_run):
+    """Command line interface."""
+    ctx.ensure_object(dict)
+    # Load config and validate ad-hoc
+    rsync_config, ctx.obj['profiles'] = load_config(config)
     try:
-        subprocess.run(cmd, shell=True, check=True)
-    except subprocess.CalledProcessError as error:
-        print(error.stdout)
-        print(error.stderr)
-        parser.exit(1, f"rsync failed")
-    if not dry_run and 'post-run-cmd' in config:
+        ctx.obj['rsync_config'] = process_rsync_config(rsync_config)
+    except KeyError as error:
+        ctx.exit(1, f"Unknow rsync config key -> {error}")
+    ctx.obj['dry_run'] = dry_run
+
+
+@cli.command()
+@click.argument('profiles_to_backup', nargs=-1)
+@click.pass_context
+def backup(ctx, profiles_to_backup):
+    """Run the backup procedure."""
+    dry_run = ctx.obj['dry_run']
+    rsync_config = ctx.obj['rsynce_config']
+    profile_config = ctx.obj['profiles']
+
+    def do_backup(profile, rsync_flags):
+        """Execute backup."""
+        if 'extra-config' in profile:
+            try:
+                rsync_flags.extend(process_rsync_config(profile['extra-config']))
+            except KeyError as error:
+                ctx.exit(1, f"Unknow rsync config key -> {error}")
+        if dry_run:
+            rsync_flags.append('--dry-run')
+        profile_config = ' '.join(rsync_flags)
+        origin = profile['origin']
+        if isinstance(origin, list):
+            origin = ' '.join(origin)
+        dest = profile['dest']
+        excludes = ' '.join(f'--exclude "{exclude}"' for exclude in profile.get('excludes', []))
+        cmd = f"rsync {origin} {dest} {profile_config} {excludes}"
+        print(cmd)
         try:
-            subprocess.run(config['post-run-cmd'], shell=True, check=True)
+            subprocess.run(cmd, shell=True, check=True)
         except subprocess.CalledProcessError as error:
-            print(f"Post-rsync cmd failed")
             print(error.stdout)
-            print(error.stderr)
-            return False
-    return True
+            ctx.exit(error.stderr)
+            ctx.exit(1, f"rsync failed")
+        if not dry_run and 'post-run-cmd' in profile:
+            try:
+                subprocess.run(profile['post-run-cmd'], shell=True, check=True)
+            except subprocess.CalledProcessError as error:
+                print(f"Post-rsync cmd failed")
+                print(error.stdout)
+                print(error.stderr)
+                return False
+        return True
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', action='store', type=str, default=os.path.expanduser('~/.backuprc'),
-                        help='Configuration file')
-    parser.add_argument('-n', '--dry-run', action='store_true', help='Dry-run?')
-    parser.add_argument('profiles', action='store', type=str, nargs='+',
-                        help="Backup profile to run")
-    # Check if rsync is available
-    if not shutil.which('rsync'):
-        parser.exit(1, "rsync executable not found in PATH")
-    args = parser.parse_args()
-    # Load config
-    rsync_config_dict, profiles = load_config(args.config)
-    for profile_name in args.profiles:
+    for profile_name in profiles_to_backup:
         print(f"rsync profile {profile_name}")
         try:
-            profile = profiles[profile_name]
+            profile = profile_config[profile_name]
         except KeyError:
-            parser.exit(1, f"Unknown profile {profile_name}")
-        if not do_backup(profile, rsync_config_dict, args.dry_run):
+            ctx.exit(1, f"Unknown profile {profile_name}")
+        if not do_backup(profile, rsync_config):
             print(f"rsync for profile {profile_name} unsuccessful")
         else:
             print(f"rsync for profile {profile_name} successful")
+
+
+@cli.command()
+@click.pass_context
+def profiles(ctx):
+    """List existing profiles."""
+    profile_list = ', '.join(ctx.obj['profiles'])
+    print(f"Available profiles: {profile_list}")
+
+
+if __name__ == "__main__":
+    # pylint: disable=E1123,E1120
+    cli(obj={})
 
 # EOF
