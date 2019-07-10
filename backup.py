@@ -20,7 +20,8 @@ import click
 assert sys.version_info >= (3, 5)
 
 
-RSYNC_OPTS = {'compress': '-z',
+RSYNC_OPTS = {'archive': '-a',
+              'compress': '-z',
               'human-readable': '-h',
               'progress': '--info=progress2',
               'delete-excluded': '--delete-excluded',
@@ -78,9 +79,8 @@ def process_rsync_config(config_list):
 @click.group()
 @click.option('-c', '--config', type=str, default=os.path.expanduser('~/.backuprc'),
               help='Configuration file')
-@click.option('-n', '--dry-run', is_flag=True, default=False, help='Dry-run?')
 @click.pass_context
-def cli(ctx, config, dry_run):
+def cli(ctx, config):
     """Command line interface."""
     ctx.ensure_object(dict)
     # Load config and validate ad-hoc
@@ -89,16 +89,15 @@ def cli(ctx, config, dry_run):
         ctx.obj['rsync_config'] = process_rsync_config(rsync_config)
     except KeyError as error:
         ctx.exit(1, f"Unknow rsync config key -> {error}")
-    ctx.obj['dry_run'] = dry_run
 
 
 @cli.command()
-@click.argument('profiles_to_backup', nargs=-1)
+@click.option('-n', '--dry-run', is_flag=True, default=False, help='Dry-run?')
+@click.argument('profiles_to_backup', nargs=-1, required=True)
 @click.pass_context
-def backup(ctx, profiles_to_backup):
+def backup(ctx, dry_run, profiles_to_backup):
     """Run the backup procedure."""
-    dry_run = ctx.obj['dry_run']
-    rsync_config = ctx.obj['rsynce_config']
+    rsync_config = ctx.obj['rsync_config']
     profile_config = ctx.obj['profiles']
 
     def do_backup(profile, rsync_flags):
@@ -109,7 +108,12 @@ def backup(ctx, profiles_to_backup):
             except KeyError as error:
                 ctx.exit(1, f"Unknow rsync config key -> {error}")
         if dry_run:
+            try:
+                rsync_flags.pop(rsync_flags.index('--info=progress2'))
+            except IndexError:
+                pass
             rsync_flags.append('--dry-run')
+            rsync_flags.append('-v')
         profile_config = ' '.join(rsync_flags)
         origin = profile['origin']
         if isinstance(origin, list):
