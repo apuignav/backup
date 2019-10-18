@@ -31,14 +31,20 @@ RSYNC_OPTS = {'archive': '-a',
 def load_config(config_file):
     """Load config file.
 
-    Arguments:
-        config_file (str): File to open.
+    Arguments
+    ---------
+    config_file : str
+        File to open.
 
-    Return:
-        tuple: rsync config and configured profiles.
+    Return
+    ------
+    tuple:
+        rsync config and configured profiles.
 
-    Raise:
-        KeyError: If parts of the configuration are missing.
+    Raise
+    -----
+    KeyError:
+        If parts of the configuration are missing.
 
     """
     if not os.path.exists(config_file):
@@ -54,14 +60,19 @@ def process_rsync_config(config_list):
     If elements of the configuration list start with a hyphen, they are
     used verbatim. Otherwise, they are replaced by the correct flag from `RSYNC_OPTS`.
 
-    Arguments:
-        config_list (list): Options to configure.
+    Arguments
+    ---------
+    config_list : list
+        Options to configure.
 
-    Return:
-        list
+    Return
+    ------
+    list
 
-    Raise:
-        KeyError: If some configuration flags are unknown.
+    Raise
+    -----
+    KeyError:
+        If some configuration flags are unknown.
 
     """
     processed_config = []
@@ -156,6 +167,20 @@ def profiles(ctx):
     """List existing profiles."""
     profile_list = ', '.join(ctx.obj['profiles'])
     print(f"Available profiles: {profile_list}")
+
+
+@cli.command()
+@click.argument('profiles_to_describe', nargs=-1, required=False)
+@click.pass_context
+def describe(ctx, profiles_to_describe):
+    """Describe the profiles."""
+    profile_defs = ctx.obj['profiles']
+    if not profiles_to_describe:
+        profiles_to_describe = tuple(profile_defs)
+    for profile in profiles_to_describe:
+        if profile not in profile_defs:
+            print(f"Unknown profile -> {profile}")
+        print("{} => {}".format(profile, profile_defs[profile].get('info', '')))
 
 
 if __name__ == "__main__":
