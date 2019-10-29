@@ -9,6 +9,7 @@
 
 import sys
 import os
+import logging
 
 import subprocess
 
@@ -113,9 +114,11 @@ def backup(ctx, dry_run, profiles_to_backup):
 
     def do_backup(profile, rsync_flags):
         """Execute backup."""
+        rsync_flags = list(rsync_flags)
         if 'extra-config' in profile:
             try:
                 rsync_flags.extend(process_rsync_config(profile['extra-config']))
+                rsync_flags = list(set(rsync_flags))
             except KeyError as error:
                 ctx.exit(1, f"Unknow rsync config key -> {error}")
         if dry_run:
@@ -132,41 +135,73 @@ def backup(ctx, dry_run, profiles_to_backup):
         dest = profile['dest']
         excludes = ' '.join(f'--exclude "{exclude}"' for exclude in profile.get('excludes', []))
         cmd = f"rsync {origin} {dest} {profile_config} {excludes}"
-        print(cmd)
+        logging.info("Executing -> %s", cmd)
         try:
             subprocess.run(cmd, shell=True, check=True)
         except subprocess.CalledProcessError as error:
-            print(error.stdout)
+            logging.error(error.stdout)
             ctx.exit(error.stderr)
             ctx.exit(1, f"rsync failed")
         if not dry_run and 'post-run-cmd' in profile:
-            try:
-                subprocess.run(profile['post-run-cmd'], shell=True, check=True)
-            except subprocess.CalledProcessError as error:
-                print(f"Post-rsync cmd failed")
-                print(error.stdout)
-                print(error.stderr)
-                return False
+            cmds = profile['post-run-cmd']
+            if not isinstance(cmds, list):
+                cmds = [cmds]
+            for cmd in cmds:
+                try:
+                    cmd_to_run = cmd.format(**profile)
+                    logging.info("Running post run command -> %s", cmd_to_run)
+                    subprocess.run(cmd_to_run, shell=True, check=True)
+                except subprocess.CalledProcessError as error:
+                    logging.error("Post-rsync cmd failed")
+                    logging.error(error.stdout)
+                    logging.error(error.stderr)
+                    return False
         return True
 
+    # Handle composed profiles
+    profile_list = []
     for profile_name in profiles_to_backup:
-        print(f"rsync profile {profile_name}")
+
+        def unfold_profile(profile_name):
+            prof_list = []
+            try:
+                profile = profile_config[profile_name]
+            except KeyError:
+                ctx.exit(1, f"Unknown profile {profile_name}")
+            if 'compose' in profile:
+                for comp_profile in profile['compose']:
+                    prof_list.extend(unfold_profile(comp_profile))
+            else:
+                prof_list.append(profile_name)
+            return prof_list
+
+        profile_list.extend(unfold_profile(profile_name))
+
+    logging.info("Finished config, running the following profiles -> {}"
+          .format(', '.join(profile_list)))
+    for profile_name in profile_list:
+        logging.info(f"rsync profile {profile_name}")
         try:
-            profile = profile_config[profile_name]
+            profile_from_config = profile_config[profile_name]
+            if 'inherit-from' in profile_from_config:
+                profile = profile_config[profile_from_config['inherit-from']].copy()
+                profile.update(profile_from_config)
+            else:
+                profile = profile_from_config
         except KeyError:
             ctx.exit(1, f"Unknown profile {profile_name}")
         if not do_backup(profile, rsync_config):
-            print(f"rsync for profile {profile_name} unsuccessful")
+            logging.error(f"rsync for profile {profile_name} unsuccessful")
         else:
-            print(f"rsync for profile {profile_name} successful")
+            logging.info(f"rsync for profile {profile_name} successful")
 
 
 @cli.command()
 @click.pass_context
 def profiles(ctx):
     """List existing profiles."""
-    profile_list = ', '.join(ctx.obj['profiles'])
-    print(f"Available profiles: {profile_list}")
+    profile_list = ', '.join([prof for prof in ctx.obj['profiles'] if not prof.startswith('_')])
+    logging.info(f"Available profiles: {profile_list}")
 
 
 @cli.command()
@@ -174,16 +209,33 @@ def profiles(ctx):
 @click.pass_context
 def describe(ctx, profiles_to_describe):
     """Describe the profiles."""
-    profile_defs = ctx.obj['profiles']
+    profile_defs = [prof for prof in ctx.obj['profiles'] if not prof.startswith('_')]
+
+    def get_description(profile):
+        output = []
+        if 'composed' in profile_defs[profile]:
+            for sub_profile in profile_defs[profile]['composed']:
+                output.extend(get_description(sub_profile))
+        else:
+            output.append("{} => {}".format(profile, profile_defs[profile].get('info', '')))
+        return output
+
     if not profiles_to_describe:
         profiles_to_describe = tuple(profile_defs)
     for profile in profiles_to_describe:
         if profile not in profile_defs:
-            print(f"Unknown profile -> {profile}")
-        print("{} => {}".format(profile, profile_defs[profile].get('info', '')))
+            logger.warning(f"Unknown profile -> {profile}")
+        description_lines = get_description(profile)
+        if len(description_lines) > 1:
+            for i in range(len(description_lines)):
+                description_lines[i] = " - " + description_lines[i]
+            description_lines.insert(0, "{} => Composed profile".format(profile))
+        logging.info("\n".join(description_lines))
 
 
 if __name__ == "__main__":
+    import coloredlogs
+    coloredlogs.install("INFO")
     # pylint: disable=E1123,E1120
     cli(obj={})
 
