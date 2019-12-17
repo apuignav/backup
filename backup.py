@@ -213,11 +213,11 @@ def describe(ctx, profiles_to_describe):
 
     def get_description(profile):
         output = []
-        if 'composed' in profile_defs[profile]:
-            for sub_profile in profile_defs[profile]['composed']:
+        if 'composed' in ctx.obj['profiles'][profile]:
+            for sub_profile in ctx.obj['profiles'][profile]['composed']:
                 output.extend(get_description(sub_profile))
         else:
-            output.append("{} => {}".format(profile, profile_defs[profile].get('info', '')))
+            output.append("{} => {}".format(profile, ctx.obj['profiles'][profile].get('info', '')))
         return output
 
     if not profiles_to_describe:
