@@ -87,6 +87,92 @@ def process_rsync_config(config_list):
                 raise KeyError(f"Unknown configuration -> {config_element}")
     return processed_config
 
+def scan_nobackupdelete_files(source_dir, dest_dir=None, tree_depth=3):
+    """Scan for .nobackupdelete files and generate both filter rules and post commands.
+    
+    Arguments
+    ---------
+    source_dir : str
+        Source directory to scan
+    dest_dir : str, optional
+        Destination directory for Archive.txt commands
+    tree_depth : int, optional
+        Depth for tree command
+        
+    Return
+    ------
+    tuple
+        (filter_rules, post_commands)
+    """
+    if not os.path.isdir(source_dir):
+        return [], []
+    
+    filter_rules = []
+    post_commands = []
+    
+    # Remove trailing slashes for consistent path handling
+    source_dir = source_dir.rstrip('/')
+    
+    # Helper function to recursively scan directories using scandir
+    def scan_recursive(current_dir, base_dir):
+        try:
+            has_nobackupdelete = False
+            subdirs = []
+            
+            # Scan the directory once
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name == '.nobackupdelete':
+                        has_nobackupdelete = True
+                    elif entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.path)
+            
+            if has_nobackupdelete:
+                # Get the relative path from source_dir
+                rel_path = os.path.relpath(current_dir, base_dir)
+                
+                # Generate filter rule
+                if rel_path == '.':
+                    # If .nobackupdelete is in the root directory
+                    filter_rules.append("--filter='protect ***'")
+                else:
+                    # Convert backslashes to forward slashes for rsync
+                    filter_rel_path = rel_path.replace('\\', '/')
+                    filter_rules.append(f"--filter='protect {filter_rel_path}/***'")
+                
+                # Generate post command for Archive.txt if dest_dir is provided
+                if dest_dir and rel_path != '.':
+                    # Create command to generate Archive.txt
+                    dest_path = os.path.join(dest_dir, rel_path)
+                    # Escape spaces in paths
+                    escaped_dest_path = dest_path.replace(' ', '\\ ')
+                    escaped_rel_path = rel_path.replace(' ', '\\ ')
+                    escaped_source_path = os.path.join(base_dir, escaped_rel_path)
+                    
+                    # Command to generate tree listing and copy back to source
+                    cmd = (f"cd {escaped_dest_path} && "
+                           f"tree -d -L {tree_depth} -N >| Archive.txt && "
+                           f"cp -a Archive.txt {escaped_source_path}/Archive.txt && cd -")
+                    
+                    post_commands.append(cmd)
+            
+            # Recursively scan subdirectories
+            for subdir in subdirs:
+                scan_recursive(subdir, base_dir)
+        except PermissionError:
+            # Skip directories we don't have permission to access
+            pass
+        except Exception as e:
+            # Handle other exceptions that might occur
+            print(f"Error scanning {current_dir}: {e}")
+    
+    # Start recursive scan
+    scan_recursive(source_dir, source_dir)
+    
+    # Include .nobackupdelete files themselves in the rsync
+    filter_rules.append("--filter='+ .nobackupdelete'")
+    return filter_rules, post_commands
+
 
 @click.group()
 @click.option('-c', '--config', type=str, default=os.path.expanduser('~/.backuprc'),
@@ -120,7 +206,26 @@ def backup(ctx, dry_run, profiles_to_backup):
                 rsync_flags.extend(process_rsync_config(profile['extra-config']))
                 rsync_flags = list(set(rsync_flags))
             except KeyError as error:
-                ctx.exit(1, f"Unknow rsync config key -> {error}")
+                ctx.exit(1, f"Unknown rsync config key -> {error}")
+
+        # Scan for .nobackupdelete files if enabled in profile
+        archive_commands = []
+        nobackupdelete_dirs = profile.get('use-nobackupdelete', [])
+
+        if nobackupdelete_dirs:
+            for dir_ in nobackupdelete_dirs:
+                origin = profile['origin']
+                dest = profile['dest'] 
+                tree_depth = profile.get('tree-depth', 3)
+                # Get filter rules and post-run commands
+                filter_rules, commands = scan_nobackupdelete_files(
+                    origin + dir_,
+                    dest + dir_ if not dry_run else None,
+                    tree_depth
+                )
+                rsync_flags.extend(filter_rules)
+                archive_commands.extend(commands)
+
         if dry_run:
             try:
                 rsync_flags.pop(rsync_flags.index('--info=progress2'))
@@ -142,6 +247,20 @@ def backup(ctx, dry_run, profiles_to_backup):
             logging.error(error.stdout)
             ctx.exit(error.stderr)
             ctx.exit(1, f"rsync failed")
+
+        # Execute Archive.txt generation commands
+        if not dry_run:
+            for cmd in archive_commands:
+                try:
+                    logging.info("Running auto-generated Archive.txt command -> %s", cmd)
+                    subprocess.run(cmd, shell=True, check=True)
+                except subprocess.CalledProcessError as error:
+                    logging.error("Archive.txt generation failed")
+                    logging.error(error.stdout)
+                    logging.error(error.stderr)
+                    # Continue with other commands even if one fails
+        
+        # Execute any explicitly configured post-run commands
         if not dry_run and 'post-run-cmd' in profile:
             cmds = profile['post-run-cmd']
             if not isinstance(cmds, list):
@@ -156,6 +275,7 @@ def backup(ctx, dry_run, profiles_to_backup):
                     logging.error(error.stdout)
                     logging.error(error.stderr)
                     return False
+
         return True
 
     # Handle composed profiles
