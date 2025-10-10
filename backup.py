@@ -332,7 +332,10 @@ def backup(ctx: click.Context, dry_run: bool, profiles_to_backup: list[str]) -> 
         excludes = " ".join(
             f'--exclude "{exclude}"' for exclude in profile.get("excludes", [])
         )
-        cmd = f"rsync {origin} {dest} {profile_config} {excludes}"
+        includes = " ".join(
+            f'--include "{include}"' for include in profile.get("includes", [])
+        )
+        cmd = f"rsync {origin} {dest} {profile_config} {includes} {excludes}"
         logging.info("Executing -> %s", cmd)
         try:
             subprocess.run(cmd, shell=True, check=True)
@@ -620,10 +623,11 @@ def restore(
         except KeyError:
             ctx.exit(1, f"Unknown profile {profile_name}")
 
-        if not do_restore(profile, rsync_config):
-            logging.error(f"Restore for profile {profile_name} unsuccessful")
-        else:
-            logging.info(f"Restore for profile {profile_name} successful")
+        try:
+            do_restore(profile, rsync_config)
+            logging.error(f"Restore for profile {profile_name} successful")
+        except Exception as error:
+            logging.info(f"Restore for profile {profile_name} unsuccessful -> {error}")
 
 
 if __name__ == "__main__":
