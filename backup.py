@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import logging
 import os
 import shlex
@@ -194,6 +195,65 @@ def scan_nobackupdelete_files(
     return filter_rules, post_commands
 
 
+def build_only_rules(origin: Path, only: list[str]) -> list[str]:
+    """Build the rsync include rules that restrict a profile to `only` entries.
+
+    The transfer root is the last component of `origin` (given without a
+    trailing slash), so the anchored paths look like `/albert/<entry>/***`.
+
+    Arguments
+    ---------
+    origin : Path
+        Origin of the profile.
+    only : list
+        Top-level entries of `origin` to copy.
+
+    Return
+    ------
+    list
+        Include rules, to be followed by a final exclude of everything else.
+    """
+    root = origin.name
+    rules = [f'--include "/{root}"']
+    for entry in only:
+        # The plain include matches single files, the `/***` one a directory's contents.
+        rules.append(f'--include "/{root}/{entry}"')
+        rules.append(f'--include "/{root}/{entry}/***"')
+    return rules
+
+
+def find_unlisted_dirs(origin: Path, only: list[str], skip: list[str]) -> list[str]:
+    """Find top-level directories of `origin` matching neither `only` nor `skip`.
+
+    Arguments
+    ---------
+    origin : Path
+        Origin of the profile.
+    only : list
+        Top-level entries that are copied.
+    skip : list
+        Glob patterns of top-level entries that are deliberately not copied.
+
+    Return
+    ------
+    list
+        Sorted names of the unlisted directories. Files are ignored.
+    """
+    if not origin.is_dir():
+        return []
+    unlisted = []
+    with os.scandir(origin) as entries:
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name in only:
+                continue
+            if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in skip):
+                continue
+            unlisted.append(entry.name)
+    return sorted(unlisted)
+
+
 def scan_norestore_files(backup_dir: Path) -> list:
     """Scan for .norestore files and generate exclude rules.
 
@@ -313,6 +373,33 @@ def backup(ctx: click.Context, dry_run: bool, profiles_to_backup: list[str]) -> 
         origin = Path(origin)
         dest = Path(profile["dest"])
 
+        # Execute any pre-run commands. If one fails, skip this profile.
+        if "pre-run-cmd" in profile:
+            pre_cmds = profile["pre-run-cmd"]
+            if not isinstance(pre_cmds, list):
+                pre_cmds = [pre_cmds]
+            for pre_cmd in pre_cmds:
+                try:
+                    pre_cmd_to_run = pre_cmd.format(**profile)
+                    logging.info("Running pre run command -> %s", pre_cmd_to_run)
+                    if not dry_run:
+                        subprocess.run(pre_cmd_to_run, shell=True, check=True)
+                except subprocess.CalledProcessError as error:
+                    logging.error("Pre-rsync cmd failed, skipping rsync")
+                    logging.error(error.stdout)
+                    logging.error(error.stderr)
+                    return False
+
+        only = profile.get("only")
+        if only:
+            unlisted = find_unlisted_dirs(origin, only, profile.get("skip", []))
+            if unlisted:
+                logging.warning(
+                    "Top-level directories of %s in neither `only` nor `skip`: %s",
+                    origin,
+                    ", ".join(unlisted),
+                )
+
         if nobackupdelete_dirs:
             for dir_ in nobackupdelete_dirs:
                 tree_depth = profile.get("tree-depth", 3)
@@ -324,7 +411,7 @@ def backup(ctx: click.Context, dry_run: bool, profiles_to_backup: list[str]) -> 
                 archive_commands.extend(commands)
 
         if dry_run:
-            with contextlib.suppress(IndexError):
+            with contextlib.suppress(IndexError, ValueError):
                 rsync_flags.pop(rsync_flags.index("--info=progress2"))
             rsync_flags.append("--dry-run")
             rsync_flags.append("-v")
@@ -335,7 +422,16 @@ def backup(ctx: click.Context, dry_run: bool, profiles_to_backup: list[str]) -> 
         includes = " ".join(
             f'--include "{include}"' for include in profile.get("includes", [])
         )
-        cmd = f"rsync {origin} {dest} {profile_config} {includes} {excludes}"
+        if only:
+            # Order matters, rsync uses the first matching rule: excludes,
+            # includes, the `only` allowlist and, last, exclude everything else.
+            only_rules = " ".join(build_only_rules(origin, only))
+            cmd = (
+                f"rsync {origin} {dest} {profile_config} {excludes} {includes} "
+                f'{only_rules} --exclude "*"'
+            )
+        else:
+            cmd = f"rsync {origin} {dest} {profile_config} {includes} {excludes}"
         logging.info("Executing -> %s", cmd)
         try:
             subprocess.run(cmd, shell=True, check=True)
@@ -559,7 +655,7 @@ def restore(
             logging.info("Ignoring .norestore markers - restoring all backed up data")
 
         if dry_run:
-            with contextlib.suppress(IndexError):
+            with contextlib.suppress(IndexError, ValueError):
                 rsync_flags.pop(rsync_flags.index("--info=progress2"))
             rsync_flags.append("--dry-run")
             rsync_flags.append("-v")
@@ -625,9 +721,9 @@ def restore(
 
         try:
             do_restore(profile, rsync_config)
-            logging.error(f"Restore for profile {profile_name} successful")
+            logging.info(f"Restore for profile {profile_name} successful")
         except Exception as error:
-            logging.info(f"Restore for profile {profile_name} unsuccessful -> {error}")
+            logging.error(f"Restore for profile {profile_name} unsuccessful -> {error}")
 
 
 if __name__ == "__main__":
