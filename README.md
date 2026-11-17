@@ -25,14 +25,14 @@ backup restore [-n] PROFILE...  # restore from the backup
 
 ## Allowlist (`only`)
 
-A list of top-level entries of `origin` to copy, for example `Arxiu` or `.claude`.
+A list of top-level entries of `origin` to copy, for example `Arxiu` or `.claude`. An entry can be a directory or a single file (for example `.zsh_history`).
 `origin` is given without a trailing slash, so rsync sees paths as `<origin name>/<entry>/...`.
 
 When `only` is set, the rsync rules are emitted in this order, because rsync uses the first rule that matches:
 
 1. The profile's `excludes`, so `**/.venv` and similar still apply inside allowed folders.
 2. The profile's `includes`.
-3. An anchored include for the transfer root and for each `only` entry (`/<root>/<entry>/***`).
+3. Anchored includes for the transfer root and, for each `only` entry, `/<root>/<entry>` (a file) and `/<root>/<entry>/***` (a directory's contents).
 4. A final `--exclude "*"` for everything else.
 
 `.nobackupdelete` protection keeps working. Profiles without `only` behave as before (includes, then excludes).

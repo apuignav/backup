@@ -216,6 +216,8 @@ def build_only_rules(origin: Path, only: list[str]) -> list[str]:
     root = origin.name
     rules = [f'--include "/{root}"']
     for entry in only:
+        # The plain include matches single files, the `/***` one a directory's contents.
+        rules.append(f'--include "/{root}/{entry}"')
         rules.append(f'--include "/{root}/{entry}/***"')
     return rules
 
@@ -409,7 +411,7 @@ def backup(ctx: click.Context, dry_run: bool, profiles_to_backup: list[str]) -> 
                 archive_commands.extend(commands)
 
         if dry_run:
-            with contextlib.suppress(IndexError):
+            with contextlib.suppress(IndexError, ValueError):
                 rsync_flags.pop(rsync_flags.index("--info=progress2"))
             rsync_flags.append("--dry-run")
             rsync_flags.append("-v")
@@ -653,7 +655,7 @@ def restore(
             logging.info("Ignoring .norestore markers - restoring all backed up data")
 
         if dry_run:
-            with contextlib.suppress(IndexError):
+            with contextlib.suppress(IndexError, ValueError):
                 rsync_flags.pop(rsync_flags.index("--info=progress2"))
             rsync_flags.append("--dry-run")
             rsync_flags.append("-v")
